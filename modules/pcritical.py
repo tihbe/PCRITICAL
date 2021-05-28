@@ -86,11 +86,10 @@ class PCritical(nn.Module):
 
         # Spikes
         S = (self.mem_pot - self.v_th).ceil_().clamp_(0, 1)
-        S_paired = (self.mem_pot_paired - self.v_th - self.alpha).ceil_().clamp_(0, 1)
-        self.S_paired = S_paired  # Store in obj for possible debugging
+        self.S_paired = (self.mem_pot_paired - self.v_th - self.alpha).ceil_().clamp_(0, 1)
 
         # Plasticity
-        if self.plasticity:  # and (inp.sum() > 0 or S.sum() > 0)
+        if self.plasticity:
             S_paired_batch = (
                 self.S_paired.max(dim=0, keepdim=True)
                 .values.view(self.N, 1)
@@ -105,28 +104,29 @@ class PCritical(nn.Module):
                 if self.stochastic_alpha
                 else self.alpha
             )
+            # spike times is self.t if we're spiking now
+            # or previous value of st
             self.st = torch.where(S > 0, torch.ones_like(self.st) * self.t, self.st)
             max_st = self.st.max(dim=0, keepdim=False).values
+
+            # The mesh grid will give us all combinations of Dt
             a, b = torch.meshgrid(max_st, max_st)
-            # self.sp += S.matmul(self.sign_mask.t().float())
 
             update_mask = (S_paired_batch > 0) & self.sign_mask
 
+            # Add factor beta at every timestep
             updated_weights = self.W_rec + self.beta
+
+            # Remove alpha*exp(Dt) on a pair neuron spike
             updated_weights[update_mask] -= factor * torch.exp(
                 (a - b)[update_mask].abs() / self.exp_tau
-            )
+            )   
+
+            # Hard-limit the weights
             updated_weights = updated_weights.clamp_(0.0, 1.0)
+
+            # Finally, only update excitatory weights
             self.W_rec = torch.where(self.sign_mask, updated_weights, self.W_rec)
-
-            # expo = torch.exp((a-b).abs() / self.exp_tau)
-            # update_value = self.beta - factor * S_paired_batch * expo
-            # new_weights = (
-            #     (update_value + self.W_rec).clamp_(0.0, 1.0)
-            # )
-
-            # # Only update excitatory weights
-            # self.W_rec = torch.where(self.sign_mask, new_weights, self.W_rec)
 
         # Input + recurrent propagation of the spikes
         active_neurons_mask = self.refrac_neurons == 0
@@ -156,12 +156,11 @@ class PCritical(nn.Module):
         self.mem_cur *= self.inv_tau_i
         self.mem_pot_paired *= self.inv_tau_v_pair
         self.mem_cur_paired *= self.inv_tau_i_pair
-        # self.sp *= self.inv_tau_v
 
         # Reset
         self.mem_pot = torch.where(S > 0, torch.zeros_like(self.mem_pot), self.mem_pot)
         self.mem_pot_paired = torch.where(
-            S_paired > 0, torch.zeros_like(self.mem_pot_paired), self.mem_pot_paired
+            self.S_paired > 0, torch.zeros_like(self.mem_pot_paired), self.mem_pot_paired
         )
 
         self.refrac_neurons = torch.where(S > 0, self.refrac, self.refrac_neurons)
@@ -177,7 +176,7 @@ class PCritical(nn.Module):
         self.mem_pot_paired[:] = 0
         self.mem_cur_paired[:] = 0
         self.refrac_neurons[:] = 0
-        # self.sp = torch.zeros_like(self.sp)
+        self.st[:] = 0
 
     def _set_mem_state(self, dtype, device):
         self.mem_pot = torch.zeros(
@@ -195,7 +194,6 @@ class PCritical(nn.Module):
         self.refrac_neurons = torch.zeros(
             (self._batch_size, self.N), dtype=torch.int32, device=device
         )
-        # self.sp = torch.zeros((self.N, self.N), dtype=dtype, device=device)
         self.st = torch.zeros(self.N, dtype=dtype, device=device)
 
     @property

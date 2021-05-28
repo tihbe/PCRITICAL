@@ -96,7 +96,7 @@ if __name__ == "__main__":
         ax[i].yaxis.set_label_coords(-0.035, 0.5)
 
     plt.tight_layout()
-    fig.savefig("spike_activity_over_time_with_branching_factor.eps", bbox_inches="tight")
+    fig.savefig("spike_activity_over_time_with_branching_factor.svg", bbox_inches="tight")
 
     # Poincaré plot for binned t >= 2500
     fig, ax = plt.subplots(figsize=(16, 10))
@@ -119,6 +119,6 @@ if __name__ == "__main__":
 
     ax.legend()
     plt.tight_layout()
-    fig.savefig("branching_factor_poincarre.eps", bbox_inches="tight")
+    fig.savefig("branching_factor_poincarre.svg", bbox_inches="tight")
 
     # plt.show()

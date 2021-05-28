@@ -56,13 +56,14 @@ class ReadoutType(Enum):
     REVERSE_EXPONENTIAL_FILTER = "Reverse exponential filter"
 
 
-def run_ntidigits(
+def run_reservoir_ntidigits(
     nb_iters: int,
+    device: torch.device,
     plasticity: bool = True,
     spectral_radius_norm: bool = False,
-    weight_decay: float = 0.,
     readout_layer_type: ReadoutType = ReadoutType.TIME_BINNING,
     debug: bool = False,
+    fix_weights_for_val: bool = True,
 ):
     _logger.info("Starting N-TIDIGITS classification experiment")
 
@@ -72,7 +73,6 @@ def run_ntidigits(
             "dt": dt,
             "plasticity": plasticity,
             "nb_iters": nb_iters,
-            "spectral_radius_norm": spectral_radius_norm,
         }
     )
 
@@ -92,14 +92,11 @@ def run_ntidigits(
         )
     )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    _logger.info("Using device type %s", str(device))
-
     batch_size = 32
     reporter.log_parameter("batch_size", batch_size)
     data_loader_parameters = {
         "batch_size": batch_size,
-        "num_workers": 4,
+        "num_workers": 2,
         "pin_memory": True,
         "timeout": 120,
         "collate_fn": collate_fn,
@@ -117,13 +114,17 @@ def run_ntidigits(
         only_single_digits=True,
     )
 
+    if debug:
+        train_set = torch.utils.data.Subset(train_set, np.arange(50))
+        val_set = torch.utils.data.Subset(val_set, np.arange(50))
+
     pcritical_configs: dict = reporter.log_parameters(
         {
             "alpha": 1e-2,
             "stochastic_alpha": False,
             "beta": 1e-5,
             "tau_v": 30 * ms,
-            "tau_i": 1 * ms,
+            "tau_i": 5 * ms,
             "tau_v_pair": 5 * ms,
             "tau_i_pair": 0 * ms,
             "v_th": 1,
@@ -141,36 +142,15 @@ def run_ntidigits(
     if readout_layer_type == ReadoutType.TIME_BINNING:
         bin_size = 60  # ms
         reporter.log_parameter("Time bin size", bin_size * ms)
-        convert_layer = TimeBinningLayer(
-            bin_size, max_duration=2464, nb_of_neurons=n_neurons
-        ).to(device)
+        convert_layer = TimeBinningLayer(bin_size, max_duration=2464, nb_of_neurons=n_neurons).to(device)
     elif readout_layer_type == ReadoutType.EXPONENTIAL_FILTER:
         exp_tau = 60
         reporter.log_parameter("Exp filter tau", exp_tau * dt)
-        convert_layer = ExponentialFilterLayer(tau=exp_tau, nb_of_neurons=n_neurons).to(
-            device
-        )
+        convert_layer = ExponentialFilterLayer(tau=exp_tau, nb_of_neurons=n_neurons).to(device)
     elif readout_layer_type == ReadoutType.REVERSE_EXPONENTIAL_FILTER:
         reverse_exp_tau = 60
         reporter.log_parameter("Reverse exp filter tau", reverse_exp_tau * dt)
-        convert_layer = ReverseExponentialFilterLayer(
-            tau=reverse_exp_tau, nb_of_neurons=n_neurons
-        ).to(device)
-
-    linear_classifier = LinearWithBN(convert_layer.number_of_features(), n_classes).to(
-        device
-    )
-    loss_fn = torch.nn.CrossEntropyLoss()
-    lr = 1e-3
-    reporter.log_parameters(
-        {"optimizer": "Adam", "weight_decay": weight_decay, "lr": lr}
-    )
-    optimizer = torch.optim.Adam(
-        linear_classifier.parameters(), lr=lr, weight_decay=weight_decay
-    )
-
-    train_accuracy_for_iters = []
-    val_accuracy_for_iters = []
+        convert_layer = ReverseExponentialFilterLayer(tau=reverse_exp_tau, nb_of_neurons=n_neurons).to(device)
 
     if debug:
         nb_of_debug_steps = 5000
@@ -185,7 +165,7 @@ def run_ntidigits(
             nb_of_debug_steps,
             ("reservoir_weights", (n_neurons, n_neurons)),
         )
-        debug_progress_bar = tqdm(total=nb_of_debug_steps, disable=not debug)
+        debug_progress_bar = tqdm(total=nb_of_debug_steps)
 
     def input_and_reservoir_layers(x):
         """
@@ -200,11 +180,7 @@ def run_ntidigits(
         current_batch_size = x.shape[0]  # 1 if unbatchifier active
 
         if not debug:
-            model[
-                1
-            ].batch_size = (
-                current_batch_size  # Will also reset neuron states (mem pot, cur)
-            )
+            model[1].batch_size = current_batch_size  # Will also reset neuron states (mem pot, cur)
         duration = x.shape[-1]
         convert_layer.reset()
 
@@ -221,76 +197,81 @@ def run_ntidigits(
 
         return lsm_output
 
-    def train_batch(x, y):
-        optimizer.zero_grad()
-        reservoir_out = unbatchifier(x, input_and_reservoir_layers)
-        net_out = linear_classifier(reservoir_out)
-        preds = torch.argmax(net_out.detach(), dim=1).cpu()
-        loss = loss_fn(net_out, y.to(device))
-        loss.backward()
-        optimizer.step()
-        return loss.cpu().detach().item(), torch.sum(preds == y).item()
-
-    def validate_batch(x, y):
-        reservoir_out = unbatchifier(x, input_and_reservoir_layers)
-        net_out = linear_classifier(reservoir_out)
-        preds = torch.argmax(net_out, dim=1).cpu()
-        return torch.sum(preds == y).item()
+    reservoir_output_for_all_iters = []
 
     for iter_nb in range(nb_iters):
         reporter.log_metric("iteration", iter_nb)
 
         # -------- TRAINING PHASE --------
-        train_generator = torch_data.DataLoader(
-            train_set, shuffle=True, **data_loader_parameters
-        )
-        progress_bar = tqdm(
-            train_generator, desc=f"train iter {iter_nb} / {nb_iters}", disable=debug
-        )
-        total_accurate = 0
-        total_elems = 0
-        for x, y in progress_bar:
-            loss_value, train_acc = train_batch(x, y)
-            total_elems += len(y)
-            total_accurate += train_acc
-            progress_bar.set_postfix(
-                loss=loss_value, cur_acc=total_accurate / total_elems
-            )
-            reporter.log_metric("loss", loss_value)
-
-        _logger.info(
-            "Final train accuracy at iter %i: %.4f",
-            iter_nb,
-            total_accurate / total_elems,
-        )
-        reporter.log_metric("train_accuracy", total_accurate / total_elems)
-        train_accuracy_for_iters.append(total_accurate / total_elems)
+        train_generator = torch_data.DataLoader(train_set, shuffle=True, **data_loader_parameters)
+        progress_bar = tqdm(train_generator, desc=f"train iter {iter_nb} / {nb_iters}", disable=debug)
+        train_batches = [(unbatchifier(x, input_and_reservoir_layers), y) for (x, y) in progress_bar]
 
         # -------- VALIDATION PHASE --------
-        val_gen = torch_data.DataLoader(
-            val_set, shuffle=False, **data_loader_parameters
-        )
-        total_accurate = 0
-        total_elems = 0
-        progress_bar = tqdm(
-            val_gen, desc=f"val iter {iter_nb} / {nb_iters}", disable=debug
-        )
+        val_gen = torch_data.DataLoader(val_set, shuffle=False, **data_loader_parameters)
+        progress_bar = tqdm(val_gen, desc=f"val iter {iter_nb} / {nb_iters}", disable=debug)
+        if fix_weights_for_val:
+            model[1].plasticity = False
+        val_batches = [(unbatchifier(x, input_and_reservoir_layers), y) for (x, y) in progress_bar]
+
+        model[1].plasticity = plasticity
+
+        reservoir_output_for_all_iters.append((train_batches, val_batches))
+
+    return reservoir_output_for_all_iters, convert_layer.number_of_features()
+
+
+def run_classification_ntidigits(
+    reservoir_output, device: torch.device, n_features, weight_decay: float = 0.0, lr=1e-3
+):
+    train_accuracy_for_iters = []
+    val_accuracy_for_iters = []
+    linear_classifier = LinearWithBN(n_features, n_classes).to(device)
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    reporter.log_parameters({"optimizer": "Adam", "weight_decay": weight_decay, "lr": lr})
+    optimizer = torch.optim.Adam(linear_classifier.parameters(), lr=lr, weight_decay=weight_decay)
+
+    pbar = tqdm(reservoir_output)
+    for train_batches, val_batches in pbar:
+        nb_accurate = 0
+        nb_elems = 0
+        sum_loss = 0
+        for train_batch in train_batches:
+            x, y = train_batch
+            optimizer.zero_grad()
+            net_out = linear_classifier(x)
+            preds = torch.argmax(net_out.detach(), dim=1).cpu()
+            loss = loss_fn(net_out, y.to(device))
+            loss.backward()
+            optimizer.step()
+            sum_loss += loss.cpu().detach().item()
+            nb_accurate += torch.sum(preds == y).item()
+            nb_elems += len(y)
+
+        train_acc = nb_accurate / nb_elems
+        pbar.set_postfix(train_loss=sum_loss / len(train_batches), train_acc=train_acc)
+        reporter.log_metric("train_accuracy", train_acc)
+        reporter.log_metric("train_loss", sum_loss / len(train_batches))
+        train_accuracy_for_iters.append(train_acc)
+
         with torch.no_grad():
-            for x, y in progress_bar:
-                nb_accurate = validate_batch(x, y)
-                total_accurate += nb_accurate
-                total_elems += len(y)
-                progress_bar.set_postfix(cur_acc=total_accurate / total_elems)
+            nb_accurate = 0
+            nb_elems = 0
+            for val_batch in val_batches:
+                x, y = val_batch
+                net_out = linear_classifier(x)
+                preds = torch.argmax(net_out.detach(), dim=1).cpu()
+                nb_accurate += torch.sum(preds == y).item()
+                nb_elems += len(y)
+            val_acc = nb_accurate / nb_elems
+            pbar.set_postfix(val_acc=val_acc)
+            reporter.log_metric("val_accuracy", val_acc)
+            val_accuracy_for_iters.append(val_acc)
 
-        if isinstance(linear_classifier[0], torch.nn.BatchNorm1d):
-            # Reset batch-norm parameters so we do use them for training
-            linear_classifier[0].reset_running_stats()
-
-        _logger.info(
-            "Final accuracy at iter %i: %.4f", iter_nb, total_accurate / total_elems
-        )
-        reporter.log_metric("accuracy", total_accurate / total_elems)
-        val_accuracy_for_iters.append(total_accurate / total_elems)
+            if isinstance(linear_classifier[0], torch.nn.BatchNorm1d):
+                # Reset batch-norm parameters so we do use them for training
+                linear_classifier[0].reset_running_stats()
 
     return train_accuracy_for_iters, val_accuracy_for_iters
 
@@ -302,6 +283,8 @@ def main(
     spectral_radius=False,
     nb_iters=10,
     weight_decay=0.0,
+    fix_weights_for_val=False,
+    save_reservoir_output=False,
 ):
     random.seed(seed)
     np.random.seed(seed)
@@ -319,18 +302,29 @@ def main(
     )
     reporter.log_parameter("seed", seed)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _logger.info("Using device type %s", str(device))
+
     # Run experiment
-    train_accuracies, test_accuracies = run_ntidigits(
+    reservoir_output, n_features = run_reservoir_ntidigits(
         nb_iters,
         plasticity=plasticity,
         spectral_radius_norm=spectral_radius,
-        weight_decay=weight_decay,
+        device=device,
         debug=debug,
+        fix_weights_for_val=fix_weights_for_val,
+    )
+
+    if save_reservoir_output:
+        import pickle
+
+        pickle.dump((reservoir_output, n_features), open("ntidigits_reservoir_output.pkl", "wb"))
+
+    train_accuracies, test_accuracies = run_classification_ntidigits(
+        reservoir_output, n_features=n_features, weight_decay=weight_decay, device=device
     )
     if not debug:
-        reporter.dump_results(
-            train_accuracies=train_accuracies, test_accuracies=test_accuracies
-        )
+        reporter.dump_results(train_accuracies=train_accuracies, test_accuracies=test_accuracies)
 
 
 if __name__ == "__main__":
