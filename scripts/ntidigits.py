@@ -134,7 +134,7 @@ def run_reservoir_ntidigits(
 
     n_neurons = topology.number_of_nodes()
     model = torch.nn.Sequential(
-        OneToNLayer(N=2, dim_input=n_features, dim_output=n_neurons),
+        OneToNLayer(N=3, dim_input=n_features, dim_output=n_neurons),
         PCritical(1, topology, dt=dt, **pcritical_configs),
     ).to(device)
     model[1].plasticity = plasticity
@@ -222,15 +222,18 @@ def run_reservoir_ntidigits(
 
 
 def run_classification_ntidigits(
-    reservoir_output, device: torch.device, n_features, weight_decay: float = 0.0, lr=1e-3
+    reservoir_output, device: torch.device, n_features, weight_decay: float = 0.0, lr=1e-3, with_batch_norm=True
 ):
     train_accuracy_for_iters = []
     val_accuracy_for_iters = []
-    linear_classifier = LinearWithBN(n_features, n_classes).to(device)
+    if with_batch_norm:
+        classifier = LinearWithBN(n_features, n_classes).to(device)
+    else:
+        classifier = torch.nn.Linear(n_features, n_classes).to(device)
     loss_fn = torch.nn.CrossEntropyLoss()
 
     reporter.log_parameters({"optimizer": "Adam", "weight_decay": weight_decay, "lr": lr})
-    optimizer = torch.optim.Adam(linear_classifier.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = torch.optim.Adam(classifier.parameters(), lr=lr, weight_decay=weight_decay)
 
     pbar = tqdm(reservoir_output)
     for train_batches, val_batches in pbar:
@@ -240,7 +243,7 @@ def run_classification_ntidigits(
         for train_batch in train_batches:
             x, y = train_batch
             optimizer.zero_grad()
-            net_out = linear_classifier(x)
+            net_out = classifier(x)
             preds = torch.argmax(net_out.detach(), dim=1).cpu()
             loss = loss_fn(net_out, y.to(device))
             loss.backward()
@@ -260,7 +263,7 @@ def run_classification_ntidigits(
             nb_elems = 0
             for val_batch in val_batches:
                 x, y = val_batch
-                net_out = linear_classifier(x)
+                net_out = classifier(x)
                 preds = torch.argmax(net_out.detach(), dim=1).cpu()
                 nb_accurate += torch.sum(preds == y).item()
                 nb_elems += len(y)
@@ -269,9 +272,9 @@ def run_classification_ntidigits(
             reporter.log_metric("val_accuracy", val_acc)
             val_accuracy_for_iters.append(val_acc)
 
-            if isinstance(linear_classifier[0], torch.nn.BatchNorm1d):
+            if isinstance(classifier, torch.nn.Sequential) and isinstance(classifier[0], torch.nn.BatchNorm1d):
                 # Reset batch-norm parameters so we do use them for training
-                linear_classifier[0].reset_running_stats()
+                classifier[0].reset_running_stats()
 
     return train_accuracy_for_iters, val_accuracy_for_iters
 
@@ -318,7 +321,7 @@ def main(
     if save_reservoir_output:
         import pickle
 
-        pickle.dump((reservoir_output, n_features), open("ntidigits_reservoir_output.pkl", "wb"))
+        pickle.dump((reservoir_output, n_features), open(f"ntidigits_reservoir_output_{seed}.pkl", "wb"))
 
     train_accuracies, test_accuracies = run_classification_ntidigits(
         reservoir_output, n_features=n_features, weight_decay=weight_decay, device=device
