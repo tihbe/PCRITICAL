@@ -134,7 +134,7 @@ def run_reservoir_ntidigits(
 
     n_neurons = topology.number_of_nodes()
     model = torch.nn.Sequential(
-        OneToNLayer(N=3, dim_input=n_features, dim_output=n_neurons),
+        OneToNLayer(N=2, dim_input=n_features, dim_output=n_neurons),
         PCritical(1, topology, dt=dt, **pcritical_configs),
     ).to(device)
     model[1].plasticity = plasticity
@@ -222,7 +222,14 @@ def run_reservoir_ntidigits(
 
 
 def run_classification_ntidigits(
-    reservoir_output, device: torch.device, n_features, weight_decay: float = 0.0, lr=1e-3, with_batch_norm=True
+    reservoir_output,
+    device: torch.device,
+    n_features,
+    weight_decay: float = 0.0,
+    lr=1e-3,
+    with_batch_norm=True,
+    amsgrad=False,
+    optimizer="Adam",
 ):
     train_accuracy_for_iters = []
     val_accuracy_for_iters = []
@@ -232,8 +239,21 @@ def run_classification_ntidigits(
         classifier = torch.nn.Linear(n_features, n_classes).to(device)
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    reporter.log_parameters({"optimizer": "Adam", "weight_decay": weight_decay, "lr": lr})
-    optimizer = torch.optim.Adam(classifier.parameters(), lr=lr, weight_decay=weight_decay)
+    reporter.log_parameters(
+        {"optimizer": optimizer, "weight_decay": weight_decay, "lr": lr, "amsgrad": amsgrad, "bn": with_batch_norm}
+    )
+    optimizer_args = {"lr": lr, "weight_decay": weight_decay}
+    if optimizer == "Adam":
+        optimizer_module = torch.optim.Adam
+        optimizer_args["amsgrad"] = amsgrad
+    elif optimizer == "AdamW":
+        optimizer_module = torch.optim.AdamW
+        optimizer_args["amsgrad"] = amsgrad
+    elif optimizer == "SGD":
+        optimizer_module = torch.optim.SGD
+        optimizer_args["momentum"] = 0.9
+
+    optimizer_func = optimizer_module(classifier.parameters(), **optimizer_args)
 
     pbar = tqdm(reservoir_output)
     for train_batches, val_batches in pbar:
@@ -242,12 +262,12 @@ def run_classification_ntidigits(
         sum_loss = 0
         for train_batch in train_batches:
             x, y = train_batch
-            optimizer.zero_grad()
+            optimizer_func.zero_grad()
             net_out = classifier(x)
             preds = torch.argmax(net_out.detach(), dim=1).cpu()
             loss = loss_fn(net_out, y.to(device))
             loss.backward()
-            optimizer.step()
+            optimizer_func.step()
             sum_loss += loss.cpu().detach().item()
             nb_accurate += torch.sum(preds == y).item()
             nb_elems += len(y)

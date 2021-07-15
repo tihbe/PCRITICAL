@@ -49,12 +49,8 @@ class SmallWorldTopology(nx.DiGraph):
         super().__init__()
         self.__dict__.update(asdict(configs))
 
-        assert (
-            len(self.minicolumn_shape) == 3
-        ), "Minicolumn shape must be of dimension 3 (3D)"
-        assert (
-            len(self.macrocolumn_shape) == 3
-        ), "Macrocolumn shape must be of dimension 3 (3D)"
+        assert len(self.minicolumn_shape) == 3, "Minicolumn shape must be of dimension 3 (3D)"
+        assert len(self.macrocolumn_shape) == 3, "Macrocolumn shape must be of dimension 3 (3D)"
 
         # Initial neuron positions (all separated by neuron_spacing)
         i, j, k = np.multiply(self.macrocolumn_shape, self.minicolumn_shape)
@@ -75,16 +71,13 @@ class SmallWorldTopology(nx.DiGraph):
         # Distance-based random connectivity
         positions = np.stack(np.asarray(self.nodes.data("position"))[:, 1])
 
-        if (
-            self.sparse_init
-        ):  # Slower but iterative (for adjacency matrices that don't fit in memory)
+        if self.sparse_init:  # Slower but iterative (for adjacency matrices that don't fit in memory)
             distances = pairwise_distances_chunked(
                 positions,
                 metric="euclidean",
                 n_jobs=-1,
                 reduce_func=lambda chunk, start: bsr_matrix(
-                    np.random.random(chunk.shape)
-                    < self.p_max * np.exp(-chunk / self.intracolumnar_sparseness)
+                    np.random.random(chunk.shape) < self.p_max * np.exp(-chunk / self.intracolumnar_sparseness)
                 ),
                 working_memory=self.mem_available,
             )
@@ -93,28 +86,26 @@ class SmallWorldTopology(nx.DiGraph):
             self.add_edges_from(zip(*adjacency_matrix.nonzero()))
         else:
             distances = cdist(positions, positions, "euclidean")
-            probabilities = self.p_max * np.exp(
-                -distances / self.intracolumnar_sparseness
-            )
+            probabilities = self.p_max * np.exp(-distances / self.intracolumnar_sparseness)
             np.fill_diagonal(probabilities, 0)  # Avoid self-connections
             rand_matrix = np.random.random(probabilities.shape)
             i, j = np.nonzero(rand_matrix < probabilities)
             self.add_edges_from(zip(i, j))
 
         n_neurons = self.number_of_nodes()
-        self.inhibitory_neurons = set(
-            np.random.permutation(n_neurons)[: int(n_neurons * self.inhibitory_prob)]
-        )
+        self.inhibitory_neurons = set(np.random.permutation(n_neurons)[: int(n_neurons * self.inhibitory_prob)])
 
         for u, v in self.edges:
             if u in self.inhibitory_neurons:
-                self.edges[u, v]["weight"] = -np.random.uniform(
-                    *self.inhibitory_init_weight_range
-                )
+                self.edges[u, v]["weight"] = -np.random.uniform(*self.inhibitory_init_weight_range)
+                # self.edges[u, v]["weight"] = -np.clip(
+                #     np.random.normal(loc=0.1, scale=0.1), *self.inhibitory_init_weight_range
+                # )
             else:
-                self.edges[u, v]["weight"] = np.random.uniform(
-                    *self.excitatory_init_weight_range
-                )
+                self.edges[u, v]["weight"] = np.random.uniform(*self.excitatory_init_weight_range)
+                # self.edges[u, v]["weight"] = -np.clip(
+                #     np.random.normal(loc=0.1, scale=0.1), *self.excitatory_init_weight_range
+                # )
 
         if self.spectral_radius_norm:
             spectral_radius = lambda matrix: np.max(np.abs(np.linalg.eigvals(matrix)))
@@ -131,8 +122,7 @@ class SmallWorldTopology(nx.DiGraph):
                 {
                     "number-of-neurons": n_neurons,
                     "number-of-synapses": self.number_of_edges(),
-                    "excitatory-ratio": 100.0
-                    * (1.0 - len(self.inhibitory_neurons) / n_neurons),
+                    "excitatory-ratio": 100.0 * (1.0 - len(self.inhibitory_neurons) / n_neurons),
                     "avg-out-degree": np.mean(out_degrees),
                     "nb-out-degree-0": len(out_degrees) - np.count_nonzero(out_degrees),
                     "nb-isolates": nx.number_of_isolates(self),

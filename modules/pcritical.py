@@ -47,16 +47,8 @@ class PCritical(nn.Module):
         if tau_i_pair is None:
             tau_i_pair = tau_i
 
-        self.inv_tau_v_pair = (
-            0.0
-            if tau_v_pair == 0 * units.ms
-            else np.exp(-(dt / tau_v_pair).magnitude).item()
-        )
-        self.inv_tau_i_pair = (
-            0.0
-            if tau_i_pair == 0 * units.ms
-            else np.exp(-(dt / tau_i_pair).magnitude).item()
-        )
+        self.inv_tau_v_pair = 0.0 if tau_v_pair == 0 * units.ms else np.exp(-(dt / tau_v_pair).magnitude).item()
+        self.inv_tau_i_pair = 0.0 if tau_i_pair == 0 * units.ms else np.exp(-(dt / tau_i_pair).magnitude).item()
 
         # Neuron states
         self.refrac = torch.tensor(
@@ -80,9 +72,7 @@ class PCritical(nn.Module):
         """
 
         # Decrement refrac counter
-        self.refrac_neurons = torch.where(
-            self.refrac_neurons > 0, self.refrac_neurons - 1, self.refrac_neurons
-        )
+        self.refrac_neurons = torch.where(self.refrac_neurons > 0, self.refrac_neurons - 1, self.refrac_neurons)
 
         # Spikes
         S = (self.mem_pot - self.v_th).ceil_().clamp_(0, 1)
@@ -90,17 +80,10 @@ class PCritical(nn.Module):
 
         # Plasticity
         if self.plasticity:
-            S_paired_batch = (
-                self.S_paired.max(dim=0, keepdim=True)
-                .values.view(self.N, 1)
-                .expand_as(self.W_rec)
-            )
+            S_paired_batch = self.S_paired.max(dim=0, keepdim=True).values.view(self.N, 1).expand_as(self.W_rec)
 
             factor = (
-                self.alpha
-                * torch.rand(
-                    (self.N, 1), dtype=self.mem_pot.dtype, device=self.mem_pot.device
-                )
+                self.alpha * torch.rand((self.N, 1), dtype=self.mem_pot.dtype, device=self.mem_pot.device)
                 if self.stochastic_alpha
                 else self.alpha
             )
@@ -118,9 +101,7 @@ class PCritical(nn.Module):
             updated_weights = self.W_rec + self.beta
 
             # Remove alpha*exp(Dt) on a pair neuron spike
-            updated_weights[update_mask] -= factor * torch.exp(
-                (a - b)[update_mask].abs() / self.exp_tau
-            )   
+            updated_weights[update_mask] -= factor * torch.exp((a - b)[update_mask].abs() / self.exp_tau)
 
             # Hard-limit the weights
             updated_weights = updated_weights.clamp_(0.0, 1.0)
@@ -131,9 +112,7 @@ class PCritical(nn.Module):
         # Input + recurrent propagation of the spikes
         active_neurons_mask = self.refrac_neurons == 0
 
-        self.mem_cur = torch.where(
-            active_neurons_mask, inp + S.matmul(self.W_rec) + self.mem_cur, self.mem_cur
-        )
+        self.mem_cur = torch.where(active_neurons_mask, inp + S.matmul(self.W_rec) + self.mem_cur, self.mem_cur)
         self.mem_cur_paired = torch.where(
             active_neurons_mask,
             S.matmul(self.W_rec.t()) + self.mem_cur_paired,
@@ -141,9 +120,7 @@ class PCritical(nn.Module):
         )
 
         # Current integration to pot
-        self.mem_pot = torch.where(
-            active_neurons_mask, self.mem_cur + self.mem_pot, self.mem_pot
-        )
+        self.mem_pot = torch.where(active_neurons_mask, self.mem_cur + self.mem_pot, self.mem_pot)
 
         self.mem_pot_paired = torch.where(
             active_neurons_mask,
@@ -159,9 +136,7 @@ class PCritical(nn.Module):
 
         # Reset
         self.mem_pot = torch.where(S > 0, torch.zeros_like(self.mem_pot), self.mem_pot)
-        self.mem_pot_paired = torch.where(
-            self.S_paired > 0, torch.zeros_like(self.mem_pot_paired), self.mem_pot_paired
-        )
+        self.mem_pot_paired = torch.where(self.S_paired > 0, torch.zeros_like(self.mem_pot_paired), self.mem_pot_paired)
 
         self.refrac_neurons = torch.where(S > 0, self.refrac, self.refrac_neurons)
         self.t += 1
@@ -169,8 +144,7 @@ class PCritical(nn.Module):
         return S
 
     def reset_neuron_states(self):
-        """Reset the membrane potential and current for the reservoir (can be used in-between samples)
-        """
+        """Reset the membrane potential and current for the reservoir (can be used in-between samples)"""
         self.mem_pot[:] = 0
         self.mem_cur[:] = 0
         self.mem_pot_paired[:] = 0
@@ -179,21 +153,11 @@ class PCritical(nn.Module):
         self.st[:] = 0
 
     def _set_mem_state(self, dtype, device):
-        self.mem_pot = torch.zeros(
-            (self._batch_size, self.N), dtype=dtype, device=device
-        )
-        self.mem_cur = torch.zeros(
-            (self._batch_size, self.N), dtype=dtype, device=device
-        )
-        self.mem_pot_paired = torch.zeros(
-            (self._batch_size, self.N), dtype=dtype, device=device
-        )
-        self.mem_cur_paired = torch.zeros(
-            (self._batch_size, self.N), dtype=dtype, device=device
-        )
-        self.refrac_neurons = torch.zeros(
-            (self._batch_size, self.N), dtype=torch.int32, device=device
-        )
+        self.mem_pot = torch.zeros((self._batch_size, self.N), dtype=dtype, device=device)
+        self.mem_cur = torch.zeros((self._batch_size, self.N), dtype=dtype, device=device)
+        self.mem_pot_paired = torch.zeros((self._batch_size, self.N), dtype=dtype, device=device)
+        self.mem_cur_paired = torch.zeros((self._batch_size, self.N), dtype=dtype, device=device)
+        self.refrac_neurons = torch.zeros((self._batch_size, self.N), dtype=torch.int32, device=device)
         self.st = torch.zeros(self.N, dtype=dtype, device=device)
 
     @property
